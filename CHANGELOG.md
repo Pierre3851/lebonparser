@@ -21,4 +21,4 @@ et le projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 - Projet recentré sur l'**application web** : suppression de l'ancien pipeline en
   ligne de commande (`report.py`, points d'entrée CLI de `scraper.py`/`analyze.py`).
 
-[Non publié]: https://github.com/Pixerot/lebonparser
+[Non publié]: https://github.com/Pierre3851/lebonparser

@@ -23,7 +23,7 @@ Le texte intégral et officiel fait foi :
 ## Signalement
 
 Pour signaler un comportement inacceptable, contacte le mainteneur
-**[@Pixerot](https://github.com/Pixerot)** via un **message privé GitHub** ou un
+**[@Pierre3851](https://github.com/Pierre3851)** via un **message privé GitHub** ou un
 signalement privé (onglet *Security* → *Report a vulnerability* du dépôt, qui permet
 un échange confidentiel). Tous les signalements sont traités avec discrétion et
 sérieux.
