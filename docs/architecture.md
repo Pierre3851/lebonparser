@@ -32,6 +32,7 @@ package "Briques" {
 cloud "leboncoin.fr\n(Next.js + DataDome)" as LBC
 node "Ollama\nqwen3:8b" as OLLAMA
 database "searches/<slug>/\nsearch.json · seen.json · analyse.log" as STORE
+node "Firefox\n(cookies)" as FF
 
 APP --> CORE
 CORE --> SCRAPE
@@ -43,7 +44,7 @@ ANALYZE --> WEB
 ANALYZE --> LLM
 WEB --> COOKIES
 WEB --> LBC
-COOKIES ..> "Firefox\ncookies" as FF
+COOKIES ..> FF
 LLM --> OLLAMA
 
 CONFIG ..> APP
@@ -71,6 +72,7 @@ centrale** qui rend les runs incrémentaux.
 
 ```plantuml
 @startuml
+allowmixing
 skinparam shadowing false
 
 object "search.json" as S {
