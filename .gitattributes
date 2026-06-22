@@ -1,0 +1,2 @@
+# Normalise les fins de ligne : LF dans le dépôt, conversion auto selon l'OS au checkout.
+* text=auto eol=lf

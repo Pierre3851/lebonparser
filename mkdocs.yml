@@ -1,0 +1,39 @@
+site_name: lebonparser
+site_description: Scrape une recherche leboncoin et filtre les annonces avec un LLM local (Ollama).
+docs_dir: docs
+
+theme:
+  name: material
+  language: fr
+  palette:
+    # Bascule clair / sombre (lebonparser utilise lui-même un thème sombre).
+    - scheme: slate
+      toggle:
+        icon: material/weather-night
+        name: Passer en clair
+    - scheme: default
+      toggle:
+        icon: material/weather-sunny
+        name: Passer en sombre
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+nav:
+  - Objectif: index.md
+  - Utilisation: utilisation.md
+  - Architecture & flux de données: architecture.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  # Rendu des blocs ```plantuml``` en SVG inline, via un serveur PlantUML public
+  # (build statique compatible GitHub Pages, sans Java local).
+  - plantuml_markdown:
+      server: https://www.plantuml.com/plantuml
+      format: svg
+      cachedir: /tmp/plantuml-cache

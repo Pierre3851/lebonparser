@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lebonparser</title>
+<style>
+ body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto;
+        padding: 0 1rem; background:#16171a; color:#e3e3e6; }
+ h1 { font-size: 1.5rem; }
+ h2 { font-size: 1.1rem; }
+ a { color:#6ea8fe; }
+ p { line-height:1.45; }
+ em { color:#c8c9cd; }
+ .card { background:#222328; border:1px solid #3a3b40; border-radius:10px;
+         padding:1rem 1.2rem; margin-bottom:1.2rem; }
+ label { display:block; font-weight:600; margin:.6rem 0 .2rem; }
+ input[type=text], textarea { width:100%; box-sizing:border-box; padding:.5rem;
+        border:1px solid #44464d; border-radius:6px; font:inherit;
+        background:#2b2d31; color:#e3e3e6; }
+ input[type=text]::placeholder, textarea::placeholder { color:#7c7f86; }
+ textarea { min-height:5rem; resize:vertical; }
+ button, a.btn-primary, a.btn-run, a.btn-light, a.btn-danger {
+          font:inherit; cursor:pointer; border:none; border-radius:6px;
+          padding:.45rem .9rem; display:inline-block; line-height:1.2;
+          text-decoration:none; }
+ .btn-primary { background:#3b82f6; color:#fff; }
+ .btn-run { background:#22a06b; color:#fff; }
+ .btn-light { background:#3a3b40; color:#e3e3e6; }
+ a.btn-light { color:#e3e3e6; }
+ .btn-danger { background:transparent; color:#f1707b; border:1px solid #f1707b; }
+ .search { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; }
+ .search .grow { flex:1 1 auto; min-width:200px; }
+ .search .name { font-weight:700; font-size:1.05rem; }
+ .meta { color:#9aa0a6; font-size:.85rem; }
+ .url { color:#8b9096; font-size:.8rem; word-break:break-all; }
+ .desc { white-space:pre-wrap; color:#c8c9cd; font-size:.9rem; }
+ #meta-prompt { margin-top:.7rem; font-family:ui-monospace, monospace; font-size:.82rem;
+                color:#d4d5d9; background:#1b1c20; }
+ .copie-ok { margin-left:.6rem; color:#3fd08a; font-size:.85rem; display:none; }
+ .copie-ok.on { display:inline; }
+ .url-row { display:flex; gap:.4rem; margin-bottom:.4rem; }
+ .url-row input { flex:1 1 auto; }
+ .url-row button { flex:0 0 auto; }
+ .progress { display:none; margin-top:.7rem; }
+ .progress.on { display:block; }
+ .bar-outer { background:#3a3b40; border-radius:6px; height:14px; overflow:hidden; }
+ .bar-inner { background:#22a06b; height:100%; width:0%; transition:width .3s; }
+ .progress .msg { font-size:.85rem; color:#b8babf; margin-top:.3rem; }
+ .progress.err .bar-inner { background:#e0566a; }
+ .empty { color:#9aa0a6; }
+</style>
+</head>
+<body>
+<h1>lebonparser</h1>
+
+<h2>Mes recherches</h2>
+{% if searches %}
+  {% for s in searches %}
+  <div class="card" data-slug="{{ s.slug }}">
+    <div class="search">
+      <div class="grow">
+        <div class="name">{{ s.name }}</div>
+        <div class="meta">
+          {{ s.stats.n_retenues }} retenue(s) / {{ s.stats.n_seen }} vue(s) ·
+          dernier run : {{ s.last_run or "jamais" }}
+        </div>
+        {% for u in s.urls %}<div class="url">{{ u }}</div>{% endfor %}
+      </div>
+      <button class="btn-run" onclick="lancer('{{ s.slug }}', this)">▶ Run</button>
+      <a class="btn-light" href="{{ url_for('results', slug=s.slug) }}"
+         style="text-decoration:none">Résultats</a>
+      <button class="btn-light"
+        onclick='editer({{ {"slug": s.slug, "name": s.name, "urls": s.urls, "critere": s.critere} | tojson }})'>
+        Éditer</button>
+      <form method="post" action="{{ url_for('delete', slug=s.slug) }}"
+            onsubmit="return confirm('Supprimer « {{ s.name }} » et son historique ?')"
+            style="display:inline">
+        <button class="btn-danger" type="submit">Suppr.</button>
+      </form>
+    </div>
+    <div class="progress" id="prog-{{ s.slug }}">
+      <div class="bar-outer"><div class="bar-inner"></div></div>
+      <div class="msg"></div>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="empty">Aucune recherche enregistrée. Crée-en une ci-dessous.</p>
+{% endif %}
+
+<h2 id="form-title">Nouvelle recherche</h2>
+<div class="card">
+  <form method="post" action="{{ url_for('save') }}" id="search-form">
+    <input type="hidden" name="slug" id="f-slug" value="">
+    <label for="f-name">Nom de la recherche</label>
+    <input type="text" id="f-name" name="name" placeholder="ex : combinaison néoprène homme" required>
+    <label>URL de recherche leboncoin (une par section)</label>
+    <div id="urls-list">
+      <div class="url-row">
+        <input type="text" name="urls" placeholder="https://www.leboncoin.fr/recherche?...">
+        <button type="button" class="btn-light" title="Retirer" onclick="retirerUrl(this)">×</button>
+      </div>
+    </div>
+    <button type="button" class="btn-light" onclick="ajouterUrl()">+ Ajouter une URL</button>
+    <label for="f-critere">Critère (ce qui rend une annonce intéressante)</label>
+    <textarea id="f-critere" name="critere"
+              placeholder="Décris en langage naturel ce qui t'intéresse et ce qui ne t'intéresse pas." required></textarea>
+    <div style="margin-top:.8rem; display:flex; gap:.5rem">
+      <button class="btn-primary" type="submit">Enregistrer</button>
+      <button class="btn-light" type="button" onclick="resetForm()">Annuler l'édition</button>
+    </div>
+  </form>
+</div>
+
+<h2>Création du critère</h2>
+<div class="card">
+  <p style="margin-top:0">
+    Pas sûr de comment rédiger un bon critère ? Copie le prompt ci-dessous, colle-le dans
+    ton chatbot gratuit préféré (Gemini, ChatGPT, Le Chat…), complète-le avec ton besoin :
+    il te posera des questions et te rédigera un critère précis et strict, prêt à coller
+    dans le champ <em>Critère</em> ci-dessus.
+  </p>
+  <button class="btn-primary" type="button" onclick="copierPrompt()">📋 Copier le prompt</button>
+  <span id="copie-ok" class="copie-ok">copié ✓</span>
+  <textarea id="meta-prompt" readonly rows="25">Tu es un assistant qui m'aide à rédiger le CRITÈRE d'un outil qui filtre automatiquement des annonces leboncoin grâce à un modèle de langage.
+
+Comment l'outil utilise mon critère (à garder en tête pour bien le calibrer) :
+- pour chaque annonce, le modèle compare le texte de l'annonce à mon critère ;
+- si l'annonce CORRESPOND au critère → elle est gardée ;
+- si l'annonce CONTREDIT le critère (mauvais type d'objet, caractéristique hors cible, article abîmé…) → elle est écartée ;
+- si les informations sont INSUFFISANTES pour trancher → elle est gardée pour que je vérifie à la main ;
+- les annonces leboncoin sont souvent courtes et incomplètes.
+
+Ta mission :
+1. Pose-moi des questions une à une pour bien cerner mon besoin : type d'objet recherché, caractéristiques OBLIGATOIRES, caractéristiques RÉDHIBITOIRES, taille/dimensions, état accepté, et surtout ce qui NE m'intéresse PAS (pièges fréquents, objets proches mais hors cible).
+2. Utilise ton outil de recherche sur internet pour te documenter sur le produit visé : vocabulaire et synonymes exacts, caractéristiques techniques typiques, gammes/modèles, et surtout les produits voisins qu'on confond facilement avec ce que je cherche (pour bien les exclure). Appuie-toi sur ces informations à jour, ne te fie pas seulement à tes connaissances.
+3. Quand mon besoin est clair, rédige UN SEUL critère en langage naturel, précis et strict, qui :
+   - décrit clairement ce que je cherche ;
+   - liste explicitement ce qui doit être écarté, sous la forme « NE M'INTÉRESSENT PAS : … » ;
+   - tient en un court paragraphe, sans fioritures.
+4. Donne-moi uniquement le critère final, prêt à copier-coller.
+
+MON BESOIN (je complète ces lignes, supprime les exemples entre crochets) :
+- Je cherche : [ex : une combinaison de plongée en néoprène]
+- Caractéristiques obligatoires : [ex : intégrale, 3 ou 4 mm, taille homme L ou XL]
+- À écarter absolument : [ex : combinaisons enfant, accessoires seuls (gants, chaussons), articles abîmés]</textarea>
+</div>
+
+<script>
+function copierPrompt() {
+  const txt = document.getElementById('meta-prompt').value;
+  const ok = document.getElementById('copie-ok');
+  const done = () => { ok.classList.add('on'); setTimeout(() => ok.classList.remove('on'), 2000); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(done).catch(selectionFallback);
+  } else {
+    selectionFallback();
+  }
+  function selectionFallback() {
+    const ta = document.getElementById('meta-prompt');
+    ta.focus(); ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { /* l'utilisateur copie à la main */ }
+  }
+}
+
+function makeUrlRow(value) {
+  const row = document.createElement('div');
+  row.className = 'url-row';
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.name = 'urls';
+  inp.placeholder = 'https://www.leboncoin.fr/recherche?...';
+  inp.value = value || '';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-light';
+  btn.title = 'Retirer';
+  btn.textContent = '×';
+  btn.onclick = () => retirerUrl(btn);
+  row.appendChild(inp);
+  row.appendChild(btn);
+  return row;
+}
+function ajouterUrl(value) {
+  document.getElementById('urls-list').appendChild(makeUrlRow(value));
+}
+function retirerUrl(btn) {
+  const list = document.getElementById('urls-list');
+  if (list.children.length > 1) btn.closest('.url-row').remove();
+  else btn.closest('.url-row').querySelector('input').value = '';  // garder au moins un champ
+}
+function setUrls(urls) {
+  const list = document.getElementById('urls-list');
+  list.innerHTML = '';
+  (urls && urls.length ? urls : ['']).forEach(u => ajouterUrl(u));
+}
+
+function editer(s) {
+  document.getElementById('f-slug').value = s.slug;
+  document.getElementById('f-name').value = s.name;
+  setUrls(s.urls);
+  document.getElementById('f-critere').value = s.critere;
+  document.getElementById('form-title').textContent = 'Modifier : ' + s.name;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function resetForm() {
+  document.getElementById('f-slug').value = '';
+  document.getElementById('search-form').reset();
+  setUrls(['']);
+  document.getElementById('form-title').textContent = 'Nouvelle recherche';
+}
+
+// À la soumission : retirer les champs URL vides ; refuser si aucune URL.
+document.getElementById('search-form').addEventListener('submit', function (e) {
+  const inputs = [...this.querySelectorAll('input[name="urls"]')];
+  if (!inputs.some(i => i.value.trim())) {
+    e.preventDefault();
+    alert('Ajoute au moins une URL.');
+    return;
+  }
+  inputs.filter(i => !i.value.trim()).forEach(i => i.closest('.url-row').remove());
+});
+
+function lancer(slug, btn) {
+  btn.disabled = true;
+  const prog = document.getElementById('prog-' + slug);
+  const bar = prog.querySelector('.bar-inner');
+  const msg = prog.querySelector('.msg');
+  prog.classList.add('on');
+  prog.classList.remove('err');
+  bar.style.width = '0%';
+  msg.textContent = 'Démarrage…';
+
+  fetch('/searches/' + slug + '/run', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => poll(d.task_id, prog, bar, msg, btn))
+    .catch(e => { msg.textContent = 'Erreur : ' + e; btn.disabled = false; });
+}
+
+function poll(taskId, prog, bar, msg, btn) {
+  fetch('/api/run/' + taskId).then(r => r.json()).then(st => {
+    if (st.error) {
+      prog.classList.add('err');
+      msg.textContent = 'Échec : ' + st.error;
+      btn.disabled = false;
+      return;
+    }
+    const pct = st.total > 0 ? Math.round(100 * st.current / st.total) : (st.done ? 100 : 5);
+    bar.style.width = pct + '%';
+    msg.textContent = st.message || st.phase;
+    if (st.done) {
+      bar.style.width = '100%';
+      const sum = st.summary || {};
+      msg.innerHTML = (st.message || 'Terminé') +
+        ' — <a href="/searches/' + st.slug + '">voir les résultats</a>';
+      btn.disabled = false;
+      return;
+    }
+    setTimeout(() => poll(taskId, prog, bar, msg, btn), 1000);
+  }).catch(e => { msg.textContent = 'Erreur de suivi : ' + e; btn.disabled = false; });
+}
+</script>
+</body>
+</html>

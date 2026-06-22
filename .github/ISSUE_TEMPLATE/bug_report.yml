@@ -1,0 +1,40 @@
+name: 🐛 Signaler un bug
+description: Quelque chose ne fonctionne pas comme prévu
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de ton aide ! ⚠️ **N'inclus aucune donnée personnelle** : pas de cookies,
+        pas d'annonces réelles, pas de captures contenant des coordonnées.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description du problème
+      description: Que se passe-t-il ? Qu'attendais-tu à la place ?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Étapes pour reproduire
+      placeholder: |
+        1. Lancer `app.py`
+        2. Créer une recherche avec …
+        3. Cliquer Run
+        4. Voir l'erreur …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Journal / message d'erreur
+      description: Copie l'extrait pertinent (anonymisé) de la console ou de `analyse.log`.
+      render: text
+  - type: input
+    id: env
+    attributes:
+      label: Environnement
+      placeholder: "OS, version de Python, modèle Ollama (ex. qwen3:8b)"
+    validations:
+      required: true

@@ -1,0 +1,29 @@
+# --- Environnement Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Données scrapées (annonces de tiers — ne jamais publier, RGPD) et état local ---
+data/
+searches/
+runs/
+.claude/
+
+# --- Build de la documentation MkDocs ---
+site/
+
+# --- Fichiers d'éditeurs / IDE ---
+.vscode/
+.idea/
+*.swp
+
+# --- Fichiers système OS ---
+.DS_Store
+Thumbs.db
+desktop.ini

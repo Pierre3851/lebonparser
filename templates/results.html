@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lebonparser — {{ search.name }}</title>
+<style>
+ body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto;
+        padding: 0 1rem; background:#16171a; color:#e3e3e6; }
+ h1 { font-size: 1.4rem; }
+ h2 { font-size: 1.15rem; margin-top: 2rem; }
+ .btn-open { font:inherit; cursor:pointer; border:none; border-radius:6px;
+             padding:.4rem .8rem; background:#3b82f6; color:#fff; }
+ a.back { color:#6ea8fe; text-decoration:none; }
+ .meta { color:#9aa0a6; margin-bottom:1rem; }
+ .ad { background:#222328; border:1px solid #3a3b40; border-radius:10px;
+       padding:1rem 1.2rem; margin-bottom:1.2rem; }
+ .ad.new { border-color:#22a06b; }
+ .ad h3 { font-size:1.05rem; margin:0 0 .3rem; }
+ .ad a { text-decoration:none; color:#6ea8fe; }
+ .price { font-weight:700; }
+ .score { float:right; background:#3b82f6; color:#fff; border-radius:6px;
+          padding:.1rem .5rem; font-size:.85rem; }
+ .ad.new .score { background:#22a06b; }
+ .raison { font-style:italic; color:#b8babf; margin:.4rem 0; }
+ .loc { color:#9aa0a6; font-size:.9rem; }
+ .found { color:#8b9096; font-size:.8rem; }
+ .desc { white-space:pre-wrap; color:#c8c9cd; font-size:.9rem; margin-top:.5rem;
+         border-top:1px solid #3a3b40; padding-top:.5rem; }
+ .empty { color:#9aa0a6; }
+</style>
+</head>
+<body>
+<p><a class="back" href="{{ url_for('index') }}">← Toutes les recherches</a></p>
+<h1>{{ search.name }}</h1>
+<div class="meta">
+  Critère : {{ search.critere }}<br>
+  {{ search.urls|length }} URL source(s){% for u in search.urls %}<br><span style="color:#888">{{ u }}</span>{% endfor %}<br>
+  Dernier run : {{ search.last_run or "jamais" }} · score min : {{ score_min }}
+</div>
+
+{% macro carte(ad, is_new=False) %}
+  <div class="ad {{ 'new' if is_new else '' }}">
+    <span class="score">score {{ ad.score }}/10</span>
+    <h3><a class="ad-link" href="{{ ad.url }}" target="_blank" rel="noopener">{{ ad.titre or "(sans titre)" }}</a></h3>
+    <div><span class="price">{{ ad.prix }} €</span> · <span class="loc">{{ ad.ville or "" }}</span></div>
+    <div class="raison">« {{ ad.raison or "" }} »</div>
+    <div class="found">trouvée le {{ ad.date_found }}</div>
+    {% if ad.description %}<div class="desc">{{ ad.description.strip() }}</div>{% endif %}
+  </div>
+{% endmacro %}
+
+{% if historique %}
+<p><button class="btn-open" onclick="ouvrirTout()">Tout ouvrir ({{ historique|length }} annonces)</button></p>
+{% endif %}
+
+<h2>Nouveautés du dernier run ({{ nouveautes|length }})</h2>
+{% if nouveautes %}
+  {% for ad in nouveautes %}{{ carte(ad, True) }}{% endfor %}
+{% else %}
+  <p class="empty">Aucune nouvelle annonce retenue au dernier run.</p>
+{% endif %}
+
+<h2>Historique complet ({{ historique|length }})</h2>
+<div id="sec-hist">
+{% if historique %}
+  {% for ad in historique %}{{ carte(ad) }}{% endfor %}
+{% else %}
+  <p class="empty">Aucune annonce retenue pour l'instant.</p>
+{% endif %}
+</div>
+
+<script>
+// Ouvre l'ensemble des résultats validés (l'historique complet, qui englobe les nouveautés).
+// On simule un clic sur un vrai lien <a target="_blank"> pour chaque annonce : le navigateur
+// le traite comme une navigation initiée par l'utilisateur, ce que le bloqueur de pop-ups
+// laisse passer — contrairement à une boucle d'ouvertures programmatiques, bloquée dès le 2e appel.
+function ouvrirTout() {
+  const liens = document.querySelectorAll('#sec-hist a.ad-link');
+  if (!liens.length) return;
+  if (liens.length > 12 &&
+      !confirm('Ouvrir ' + liens.length + ' onglets ? Si le navigateur bloque, autorise les pop-ups pour ce site.')) {
+    return;
+  }
+  liens.forEach(function (lien) {
+    const a = document.createElement('a');
+    a.href = lien.href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+}
+</script>
+</body>
+</html>
