@@ -62,12 +62,37 @@ def _require_env(name: str) -> str:
     return val
 
 
-# Backend obligatoire, sans défaut.
-LLM_BACKEND = _require_env("LLM_BACKEND")
-if LLM_BACKEND not in ("ollama", "api"):
-    raise SystemExit(
-        f"LLM_BACKEND doit valoir « ollama » ou « api » (lu : « {LLM_BACKEND} »)."
-    )
+# Config LLM, peuplée par validate() au démarrage (cf. app.main). Tant que validate()
+# n'a pas été appelée, ces variables valent None : importer ce module ne valide donc
+# rien et n'exige pas de .env — pratique pour les tests et les imports utilitaires.
+# La validation reste fail-fast, mais explicitement déclenchée au point d'entrée.
+LLM_BACKEND = None
+LLM_MODEL = None
+LLM_MAX_TOKENS = None
+LLM_CONCURRENCY = None
+LLM_RPM = None
+
+
+def validate() -> None:
+    """Valide la config LLM (.env) et peuple les variables de module ci-dessus.
+
+    À appeler une fois au démarrage de l'application. Lève SystemExit avec un message
+    clair si une variable obligatoire manque ou est invalide (aucun défaut, aucun
+    fallback). Les variables « api » ne sont exigées que si LLM_BACKEND == "api"."""
+    global LLM_BACKEND, LLM_MODEL, LLM_MAX_TOKENS, LLM_CONCURRENCY, LLM_RPM
+    LLM_BACKEND = _require_env("LLM_BACKEND")
+    if LLM_BACKEND not in ("ollama", "api"):
+        raise SystemExit(
+            f"LLM_BACKEND doit valoir « ollama » ou « api » (lu : « {LLM_BACKEND} »)."
+        )
+    if LLM_BACKEND == "api":
+        LLM_MODEL = _require_env("LLM_MODEL")
+        LLM_MAX_TOKENS = int(_require_env("LLM_MAX_TOKENS"))
+        LLM_CONCURRENCY = int(_require_env("LLM_CONCURRENCY"))
+        LLM_RPM = int(_require_env("LLM_RPM"))
+        if LLM_RPM <= 0:
+            raise SystemExit("LLM_RPM doit être un entier > 0 (requêtes/minute).")
+        _require_env("LLM_API_KEY")  # secret lu au moment de construire le client (llm.py)
 
 # ---------------------------------------------------------------------------
 # Analyse par le LLM local (Ollama)  — backend "ollama"
@@ -96,28 +121,19 @@ OLLAMA_NUM_PREDICT = 4096
 # ---------------------------------------------------------------------------
 # Analyse par un LLM distant via clé d'API  — backend "api"
 # ---------------------------------------------------------------------------
-# Backend "api" : TOUT vient de .env, AUCUN défaut. Ces variables ne sont exigées
-# que si LLM_BACKEND == "api" (un utilisateur Ollama n'a pas à les renseigner).
-#
-#   - LLM_MODEL     : modèle au format Instructor "<fournisseur>/<modèle>". C'est le
-#                     SEUL endroit qui désigne le fournisseur ; le code l'ignore.
-#   - LLM_MAX_TOKENS: plafond de tokens générés par jugement (réponse JSON courte).
+# Backend "api" : TOUT vient de .env, AUCUN défaut, validé par validate() (ci-dessus).
+# Ces variables ne sont exigées que si LLM_BACKEND == "api" (un utilisateur Ollama n'a
+# pas à les renseigner) :
+#   - LLM_MODEL      : modèle au format Instructor "<fournisseur>/<modèle>". C'est le
+#                      SEUL endroit qui désigne le fournisseur ; le code l'ignore.
+#   - LLM_MAX_TOKENS : plafond de tokens générés par jugement (réponse JSON courte).
 #   - LLM_CONCURRENCY: jugements menés EN PARALLÈLE. ⚠ Seul l'appel au LLM distant
-#                     est parallélisé ; le téléchargement des annonces reste SÉQUENTIEL
-#                     et throttlé (anti-DataDome).
-#   - LLM_RPM       : débit MAX en requêtes/minute autorisé par ton offre. L'app
-#                     espace les départs (60/LLM_RPM s) pour ne jamais le dépasser
-#                     → aucun 429 (ex. palier gratuit Gemini = 15).
-#   - LLM_API_KEY   : clé du fournisseur (présence vérifiée ici, lue par llm.py).
-API_MODEL = API_MAX_TOKENS = LLM_CONCURRENCY = LLM_RPM = None
-if LLM_BACKEND == "api":
-    API_MODEL = _require_env("LLM_MODEL")
-    API_MAX_TOKENS = int(_require_env("LLM_MAX_TOKENS"))
-    LLM_CONCURRENCY = int(_require_env("LLM_CONCURRENCY"))
-    LLM_RPM = int(_require_env("LLM_RPM"))
-    if LLM_RPM <= 0:
-        raise SystemExit("LLM_RPM doit être un entier > 0 (requêtes/minute).")
-    _require_env("LLM_API_KEY")  # secret lu au moment de construire le client (llm.py)
+#                      est parallélisé ; le téléchargement des annonces reste SÉQUENTIEL
+#                      et throttlé (anti-DataDome).
+#   - LLM_RPM        : débit MAX en requêtes/minute autorisé par ton offre. L'app
+#                      espace les départs (60/LLM_RPM s) pour ne jamais le dépasser
+#                      → aucun 429 (ex. palier gratuit Gemini = 15).
+#   - LLM_API_KEY    : clé du fournisseur (présence vérifiée par validate(), lue par llm.py).
 
 # On retient les annonces dont le score (0-10) attribué par le LLM est >= :
 SCORE_MIN = 6

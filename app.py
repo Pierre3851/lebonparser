@@ -124,6 +124,7 @@ def results(slug: str):
 
 
 def main() -> None:
+    config.validate()  # fail-fast : valide la config LLM (.env) avant de démarrer
     url = "http://127.0.0.1:5000"
     print(f"lebonparser — interface web sur {url}")
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()

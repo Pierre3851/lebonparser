@@ -25,6 +25,33 @@ import config
 log = logging.getLogger("lebonparser")
 
 
+class _Lazy:
+    """Valeur construite à la demande, une seule fois, de façon thread-safe.
+
+    Remplace le motif « global + double-checked locking » répété pour le client
+    Ollama, le client API et le limiteur de débit."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._value = None
+        self._lock = threading.Lock()
+
+    def get(self):
+        if self._value is None:
+            with self._lock:
+                if self._value is None:
+                    self._value = self._factory()
+        return self._value
+
+
+def max_concurrency() -> int:
+    """Nombre de jugements simultanés permis par le backend courant (1 = séquentiel).
+
+    Propriété déclarative du backend : c'est ICI (et non chez l'appelant) qu'on sait
+    si le jugement est parallélisable. Seul le backend « api » l'est."""
+    return config.LLM_CONCURRENCY if config.LLM_BACKEND == "api" else 1
+
+
 class Jugement(BaseModel):
     interessant: bool = Field(description="L'annonce correspond-elle au critère ?")
     score: int = Field(ge=0, le=10, description="Pertinence de 0 (hors sujet) à 10 (parfait)")
@@ -76,19 +103,12 @@ def check_ready() -> None:
 # Backend "ollama" (modèle local)
 # --------------------------------------------------------------------------- #
 
-_ollama_client = None
-_ollama_lock = threading.Lock()
+def _make_ollama_client():
+    import ollama
+    return ollama.Client(host=config.OLLAMA_HOST)
 
 
-def _client():
-    """Client Ollama (créé à la demande)."""
-    global _ollama_client
-    if _ollama_client is None:
-        with _ollama_lock:
-            if _ollama_client is None:
-                import ollama
-                _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
-    return _ollama_client
+_ollama = _Lazy(_make_ollama_client)
 
 
 def _judge_ollama(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
@@ -110,7 +130,7 @@ def _judge_ollama(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
     def _chat(think):
         # Pas de repli sur une ancienne signature : si le client ollama ne supporte
         # pas `think`, l'erreur doit remonter (aucun fallback silencieux).
-        return _client().chat(think=think, **kwargs)
+        return _ollama.get().chat(think=think, **kwargs)
 
     resp = _chat(config.OLLAMA_THINK)
     content = (resp["message"].get("content") or "").strip()
@@ -168,7 +188,7 @@ def _log_usage_ollama(resp) -> None:
 def _check_ready_ollama() -> None:
     """Vérifie qu'Ollama répond et que le modèle est disponible (sinon explique)."""
     try:
-        models = [m["model"] for m in _client().list().get("models", [])]
+        models = [m["model"] for m in _ollama.get().list().get("models", [])]
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
             f"Ollama injoignable sur {config.OLLAMA_HOST} ({exc}).\n"
@@ -188,9 +208,6 @@ def _check_ready_ollama() -> None:
 
 # Variable d'environnement (chargée depuis .env par config) contenant la clé d'API.
 _API_KEY_ENV = "LLM_API_KEY"
-
-_api_client_singleton = None
-_api_lock = threading.Lock()
 
 
 class _RateLimiter:
@@ -219,39 +236,28 @@ class _RateLimiter:
             time.sleep(wait)
 
 
-_rate_limiter_singleton = None
+# Limiteur de débit partagé (créé à la demande, après lecture de config.LLM_RPM).
+_limiter = _Lazy(lambda: _RateLimiter(config.LLM_RPM))
 
 
-def _rate_limiter() -> _RateLimiter:
-    """Limiteur de débit partagé (créé à la demande, après lecture de config.LLM_RPM)."""
-    global _rate_limiter_singleton
-    if _rate_limiter_singleton is None:
-        with _api_lock:
-            if _rate_limiter_singleton is None:
-                _rate_limiter_singleton = _RateLimiter(config.LLM_RPM)
-    return _rate_limiter_singleton
-
-
-def _api_client():
-    """Client Instructor (créé à la demande, partagé entre threads).
+def _make_api_client():
+    """Construit le client Instructor.
 
     La clé est transmise explicitement (depuis LLM_API_KEY) plutôt que via la
     variable propre au fournisseur, pour rester indépendant du fournisseur.
-    Le client sous-jacent (httpx) gère les requêtes concurrentes — on peut donc
-    le réutiliser depuis le ThreadPool de jugement (cf. analyze._analyser_parallele)."""
-    global _api_client_singleton
-    if _api_client_singleton is None:
-        with _api_lock:
-            if _api_client_singleton is None:
-                import instructor
-                # Pas de `mode=` : Instructor choisit le mode adapté au fournisseur
-                # (sortie structurée / tools selon Anthropic, Gemini, OpenAI…).
-                # Clé lue via _require_env : erreur explicite si absente (jamais None).
-                _api_client_singleton = instructor.from_provider(
-                    config.API_MODEL,
-                    api_key=config._require_env(_API_KEY_ENV),
-                )
-    return _api_client_singleton
+    Pas de `mode=` : Instructor choisit le mode adapté au fournisseur (sortie
+    structurée / tools selon Anthropic, Gemini, OpenAI…).
+    Clé lue via _require_env : erreur explicite si absente (jamais None)."""
+    import instructor
+    return instructor.from_provider(
+        config.LLM_MODEL,
+        api_key=config._require_env(_API_KEY_ENV),
+    )
+
+
+# Client API partagé entre threads : le client sous-jacent (httpx) gère les requêtes
+# concurrentes, on le réutilise donc depuis le ThreadPool (cf. analyze._analyser_parallele).
+_api = _Lazy(_make_api_client)
 
 
 def _judge_api(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
@@ -259,14 +265,14 @@ def _judge_api(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
     # schéma n'est pas respecté (remplace le filet anti-troncature d'Ollama).
     # Respecte le débit max du fournisseur (LLM_RPM) AVANT d'émettre la requête :
     # espace les départs pour ne jamais déclencher de 429 (prévention déterministe).
-    _rate_limiter().acquire()
+    _limiter.get().acquire()
     # Pas de comptage de tokens ici : il n'existe pas de champ d'usage agnostique
     # entre fournisseurs sans ajouter une dépendance (LiteLLM). On évite donc toute
     # lecture tolérante multi-champs ; suivi du coût via le tableau de bord du fournisseur.
-    jugement = _api_client().chat.completions.create(
+    jugement = _api.get().chat.completions.create(
         response_model=Jugement,
         max_retries=2,
-        max_tokens=config.API_MAX_TOKENS,
+        max_tokens=config.LLM_MAX_TOKENS,
         messages=[
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": _user(annonce_texte, critere)},
@@ -282,10 +288,10 @@ def _check_ready_api() -> None:
     config au démarrage — sans valeur par défaut. Ici on ne fait que construire le
     client, pour détecter tôt un modèle/paquet fournisseur invalide."""
     try:
-        _api_client()
+        _api.get()
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
-            f"Client API '{config.API_MODEL}' non initialisable ({exc}).\n"
+            f"Client API '{config.LLM_MODEL}' non initialisable ({exc}).\n"
             "Vérifie le nom du modèle (format Instructor « fournisseur/modèle ») "
             "et que le paquet du fournisseur est installé."
         )
