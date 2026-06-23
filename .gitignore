@@ -9,6 +9,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# --- Secrets (clé d'API LLM) — NE JAMAIS COMMITER ---
+.env
+.env.*
+!.env.example
+
 # --- Données scrapées (annonces de tiers — ne jamais publier, RGPD) et état local ---
 data/
 searches/
