@@ -27,6 +27,7 @@ import time
 import config
 import llm
 import web
+from models import Annonce, Progress
 
 log = logging.getLogger("lebonparser")
 
@@ -43,32 +44,39 @@ def _useful_attributes(attributs: dict) -> dict:
     return out
 
 
-def _full_text(ad: dict) -> str:
+def _full_text(ad: Annonce) -> str:
     """Texte intégral (titre + prix + lieu + attributs utiles + description)."""
     lignes = [
-        f"Titre : {ad.get('titre')}",
-        f"Prix : {ad.get('prix')} €",
-        f"Lieu : {ad.get('ville')}",
+        f"Titre : {ad.titre}",
+        f"Prix : {ad.prix} €",
+        f"Lieu : {ad.ville}",
     ]
-    for k, v in _useful_attributes(ad.get("attributs")).items():
+    for k, v in _useful_attributes(ad.attributs).items():
         lignes.append(f"{k} : {v}")
-    lignes.append(f"\nDescription :\n{ad.get('description') or ''}")
+    lignes.append(f"\nDescription :\n{ad.description or ''}")
     return "\n".join(lignes)
 
 
-def _fetch_description(session, ad: dict, index: int, total: int) -> None:
+def _throttle(t0: float) -> None:
+    """Respecte le plancher anti-DataDome (MIN_FETCH_INTERVAL) depuis l'instant `t0`."""
+    reste = config.MIN_FETCH_INTERVAL - (time.monotonic() - t0)
+    if reste > 0:
+        time.sleep(reste)
+
+
+def _fetch_description(session, ad: Annonce, index: int, total: int) -> None:
     """Étape 1 : télécharge le texte intégral de l'annonce (accès réseau leboncoin)."""
-    log.info("[%d/%d] %s — %s €", index, total, ad.get("titre"), ad.get("prix"))
-    log.info("        url : %s", ad.get("url"))
+    log.info("[%d/%d] %s — %s €", index, total, ad.titre, ad.prix)
+    log.info("        url : %s", ad.url)
     try:
-        ad["description"] = web.fetch_body(session, ad["url"])
-        log.info("        texte récupéré (%d caractères)", len(ad["description"]))
+        ad.description = web.fetch_body(session, ad.url)
+        log.info("        texte récupéré (%d caractères)", len(ad.description))
     except Exception as exc:  # noqa: BLE001
-        ad["description"] = ""
+        ad.description = ""
         log.warning("        échec téléchargement : %s: %s", type(exc).__name__, exc)
 
 
-def _judge_description(ad: dict, index: int, total: int, critere: str) -> bool:
+def _judge_description(ad: Annonce, index: int, total: int, critere: str) -> bool:
     """Étape 2-3 : juge l'annonce déjà téléchargée (appel LLM). Retourne True si retenue.
 
     `critere` : critère de filtrage en langage naturel (propre à la recherche)."""
@@ -76,66 +84,70 @@ def _judge_description(ad: dict, index: int, total: int, critere: str) -> bool:
     log.debug("        --- texte envoyé au LLM ---\n%s\n        ---------------------------", texte)
     try:
         j, raisonnement = llm.judge(texte, critere)
-        ad["score"], ad["interessant"], ad["raison"] = j.score, j.interessant, j.raison
-        ad["erreur"] = False
+        ad.score, ad.interessant, ad.raison = j.score, j.interessant, j.raison
+        ad.erreur = False
         if raisonnement:
             log.debug("        --- raisonnement (thinking) ---\n%s\n        ---------------------------", raisonnement)
         log.debug("        réponse LLM : %s", j.model_dump_json())
     except Exception as exc:  # noqa: BLE001
         # Marqué erreur : sera rejugé au prochain run (pas figé à score 0 dans seen.json).
-        ad["score"], ad["interessant"], ad["raison"], ad["erreur"] = 0, False, "erreur d'analyse", True
+        ad.score, ad.interessant, ad.raison, ad.erreur = 0, False, "erreur d'analyse", True
         log.warning("        échec jugement : %s: %s", type(exc).__name__, exc)
 
-    retenue = ad["score"] >= config.SCORE_MIN
+    retenue = ad.score >= config.SCORE_MIN
     log.info(
         "        verdict : %s  score %d/10 — %s",
         "RETENUE ✓" if retenue else "écartée",
-        ad["score"],
-        ad["raison"],
+        ad.score,
+        ad.raison,
     )
     return retenue
 
 
-def analyser_annonce(session, ad: dict, index: int, total: int, critere: str) -> bool:
+def analyser_annonce(session, ad: Annonce, index: int, total: int, critere: str) -> bool:
     """Traite une annonce (télécharge puis juge). Retourne True si retenue."""
     _fetch_description(session, ad, index, total)
     return _judge_description(ad, index, total, critere)
 
 
-def analyser_liste(session, ads: list[dict], critere: str,
-                   skip_ids: set | None = None, progress_cb=None) -> list[dict]:
+def analyser_liste(session, ads: list[Annonce], critere: str,
+                   skip_ids: set | None = None, progress_cb=None) -> list[Annonce]:
     """Juge les annonces de `ads` non encore vues (id absent de `skip_ids`).
 
     Chaque annonce jugée est modifiée sur place (score/interessant/raison/description).
-    `progress_cb(i, total, ad)` est appelé après chaque annonce (pour l'UI / sauvegarde) ;
-    `i` est le nombre d'annonces terminées (ordre non garanti en mode parallèle).
-    Renvoie la liste des annonces effectivement jugées (les nouvelles)."""
+    `progress_cb(Progress)` est appelé après chaque annonce (pour l'UI / sauvegarde),
+    avec `item` = l'annonce jugée ; `current` = le nombre d'annonces terminées (ordre
+    non garanti en mode parallèle). Renvoie la liste des annonces effectivement jugées.
+
+    Le régime (séquentiel ou parallèle) découle de llm.max_concurrency() : l'appelant
+    n'a pas à connaître le backend."""
     skip_ids = skip_ids or set()
-    a_juger = [ad for ad in ads if str(ad.get("id")) not in skip_ids]
+    a_juger = [ad for ad in ads if ad.id_str not in skip_ids]
     total = len(a_juger)
-    if config.LLM_BACKEND == "api" and config.LLM_CONCURRENCY > 1 and total > 1:
+    if llm.max_concurrency() > 1 and total > 1:
         _analyser_parallele(session, a_juger, critere, total, progress_cb)
     else:
         _analyser_sequentiel(session, a_juger, critere, total, progress_cb)
     return a_juger
 
 
-def _analyser_sequentiel(session, a_juger: list[dict], critere: str,
+def _notify(progress_cb, done: int, total: int, ad: Annonce) -> None:
+    if progress_cb:
+        progress_cb(Progress("analyse", done, total, f"Analyse {done}/{total} — {ad.titre}", item=ad))
+
+
+def _analyser_sequentiel(session, a_juger: list[Annonce], critere: str,
                          total: int, progress_cb) -> None:
     """Téléchargement + jugement entrelacés, une annonce à la fois (backend Ollama)."""
     for i, ad in enumerate(a_juger, 1):
         t0 = time.monotonic()
         analyser_annonce(session, ad, i, total, critere)
-        if progress_cb:
-            progress_cb(i, total, ad)
-        # Plancher de sécurité entre deux requêtes réseau.
-        if i < total:
-            reste = config.MIN_FETCH_INTERVAL - (time.monotonic() - t0)
-            if reste > 0:
-                time.sleep(reste)
+        _notify(progress_cb, i, total, ad)
+        if i < total:  # plancher de sécurité entre deux requêtes réseau
+            _throttle(t0)
 
 
-def _analyser_parallele(session, a_juger: list[dict], critere: str,
+def _analyser_parallele(session, a_juger: list[Annonce], critere: str,
                         total: int, progress_cb) -> None:
     """Phase A (téléchargement séquentiel throttlé) puis Phase B (jugement parallèle).
 
@@ -151,13 +163,11 @@ def _analyser_parallele(session, a_juger: list[dict], critere: str,
         t0 = time.monotonic()
         _fetch_description(session, ad, i, total)
         if i < total:
-            reste = config.MIN_FETCH_INTERVAL - (time.monotonic() - t0)
-            if reste > 0:
-                time.sleep(reste)
+            _throttle(t0)
 
     # --- Phase B : jugement LLM EN PARALLÈLE ---
-    log.info("Phase B : jugement de %d annonce(s) (%d en parallèle)…",
-             total, config.LLM_CONCURRENCY)
+    workers = llm.max_concurrency()
+    log.info("Phase B : jugement de %d annonce(s) (%d en parallèle)…", total, workers)
     done = 0
     lock = threading.Lock()
 
@@ -166,7 +176,7 @@ def _analyser_parallele(session, a_juger: list[dict], critere: str,
         _judge_description(ad, i, total, critere)
         return ad
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.LLM_CONCURRENCY) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_work, (i, ad)) for i, ad in enumerate(a_juger, 1)]
         for fut in concurrent.futures.as_completed(futures):
             ad = fut.result()
@@ -174,5 +184,4 @@ def _analyser_parallele(session, a_juger: list[dict], critere: str,
             # progress_cb n'est donc jamais appelé par deux threads à la fois.
             with lock:
                 done += 1
-                if progress_cb:
-                    progress_cb(done, total, ad)
+                _notify(progress_cb, done, total, ad)

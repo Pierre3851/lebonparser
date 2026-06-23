@@ -14,6 +14,7 @@ from parsel import Selector
 
 import config
 from cookies import get_leboncoin_cookies
+from models import Annonce
 
 
 def build_session() -> "requests.Session":
@@ -57,28 +58,28 @@ def _flatten_attributes(attributes) -> dict:
     return out
 
 
-def _ad_summary(ad: dict) -> dict:
+def _ad_summary(ad: dict) -> Annonce:
     """Champs utiles d'une annonce issue de la liste (sans description complète)."""
     loc = ad.get("location") or {}
-    return {
-        "id": ad.get("list_id") or ad.get("id"),
-        "titre": ad.get("subject"),
-        "prix": _first(ad.get("price")),
-        "url": ad.get("url"),
-        "date_publication": ad.get("first_publication_date"),
-        "categorie": ad.get("category_name"),
-        "marque": ad.get("brand"),
-        "ville": loc.get("city_label") or loc.get("city"),
-        "code_postal": loc.get("zipcode"),
-        "departement": loc.get("department_name"),
-        "attributs": _flatten_attributes(ad.get("attributes")),
-        "nb_images": len(ad.get("images") or []) if not isinstance(ad.get("images"), dict)
-        else (ad.get("images") or {}).get("nb_images", 0),
-        "description": None,  # rempli à l'étape d'enrichissement
-    }
+    images = ad.get("images")
+    nb_images = (images or {}).get("nb_images", 0) if isinstance(images, dict) else len(images or [])
+    return Annonce(
+        id=ad.get("list_id") or ad.get("id"),
+        titre=ad.get("subject"),
+        prix=_first(ad.get("price")),
+        url=ad.get("url"),
+        date_publication=ad.get("first_publication_date"),
+        categorie=ad.get("category_name"),
+        marque=ad.get("brand"),
+        ville=loc.get("city_label") or loc.get("city"),
+        code_postal=loc.get("zipcode"),
+        departement=loc.get("department_name"),
+        attributs=_flatten_attributes(ad.get("attributes")),
+        nb_images=nb_images,
+    )  # description reste None : remplie à l'étape d'enrichissement
 
 
-def search_page(session, search_url: str, page: int) -> tuple[list[dict], int]:
+def search_page(session, search_url: str, page: int) -> tuple[list[Annonce], int]:
     """Récupère une page de résultats. Retourne (annonces, total)."""
     sep = "&" if "?" in search_url else "?"
     url = f"{search_url}{sep}page={page}"

@@ -28,6 +28,7 @@ import scraper
 import analyze
 import llm
 import web
+from models import Annonce, Progress
 
 SEARCHES_DIR = "searches"
 log = logging.getLogger("lebonparser")
@@ -82,18 +83,9 @@ def _clean_urls(urls: list[str]) -> list[str]:
     return out
 
 
-def _normalize(search: dict) -> dict:
-    """Garantit la présence de `urls` (liste). Migre l'ancien champ `url` (chaîne)."""
-    if "urls" not in search:
-        legacy = search.get("url")
-        search["urls"] = [legacy] if legacy else []
-    search.pop("url", None)
-    return search
-
-
 def load_search(slug: str) -> dict:
     with open(_search_file(slug), encoding="utf-8") as f:
-        return _normalize(json.load(f))
+        return json.load(f)
 
 
 def save_search(search: dict) -> None:
@@ -214,27 +206,26 @@ def _setup_logging(slug: str) -> None:
     log.addHandler(fichier)
 
 
-def _record(ad: dict, run_ts: str) -> dict:
+def _record(ad: Annonce, run_ts: str) -> dict:
     """Enregistrement minimal et stable d'une annonce jugée pour seen.json."""
     return {
-        "id": str(ad.get("id")),
-        "titre": ad.get("titre"),
-        "url": ad.get("url"),
-        "prix": ad.get("prix"),
-        "ville": ad.get("ville"),
-        "description": ad.get("description") or "",
-        "score": ad.get("score", 0),
-        "interessant": ad.get("interessant", False),
-        "raison": ad.get("raison", ""),
-        "erreur": bool(ad.get("erreur", False)),
+        "id": ad.id_str,
+        "titre": ad.titre,
+        "url": ad.url,
+        "prix": ad.prix,
+        "ville": ad.ville,
+        "description": ad.description or "",
+        "score": ad.score,
+        "interessant": ad.interessant,
+        "raison": ad.raison,
+        "erreur": bool(ad.erreur),
         "date_found": run_ts,
     }
 
 
 def _en_erreur(rec: dict) -> bool:
-    """Une annonce déjà vue dont le jugement avait échoué (à rejuger).
-    Gère aussi les anciennes entrées sans le champ 'erreur'."""
-    return bool(rec.get("erreur")) or rec.get("raison") == "erreur d'analyse"
+    """Une annonce déjà vue dont le jugement avait échoué (à rejuger)."""
+    return bool(rec.get("erreur"))
 
 
 def run_search(slug: str, progress_cb=None) -> dict:
@@ -255,24 +246,28 @@ def run_search(slug: str, progress_cb=None) -> dict:
         session = web.build_session()
         seen = load_seen(slug)
 
+        # Relais unique des événements de progression (scraper + analyze émettent un
+        # `Progress`). Quand `item` est présent (une annonce vient d'être jugée), on la
+        # persiste dans seen.json de façon incrémentale ; on transmet toujours l'état à
+        # l'UI sous forme de dict (contrat inchangé côté app/JS).
+        def on_progress(p: Progress) -> None:
+            if p.item is not None:
+                seen[p.item.id_str] = _record(p.item, run_ts)
+                save_seen(slug, seen)  # incrémental : un crash ne perd pas le travail fait
+            if progress_cb:
+                progress_cb({"phase": p.phase, "current": p.current,
+                             "total": p.total, "message": p.message})
+
         # 1. Scraping : une recherche peut couvrir plusieurs URL (sections leboncoin).
         #    On parcourt chaque source et on fusionne les annonces en dédoublonnant
         #    par id (une même annonce peut figurer dans plusieurs sections).
         urls = search.get("urls") or []
         ads, vus_run = [], set()
         for src, url in enumerate(urls, 1):
-            def _scrape_progress(page, nb_pages, cumul, _src=src):
-                if progress_cb:
-                    src_txt = f"Source {_src}/{len(urls)} — " if len(urls) > 1 else ""
-                    progress_cb({
-                        "phase": "scraping", "current": page, "total": nb_pages,
-                        "message": f"{src_txt}page {page}/{nb_pages} — {cumul} annonces",
-                    })
-
-            for ad in scraper.scrape(session, url, progress_cb=_scrape_progress):
-                aid = str(ad.get("id"))
-                if aid not in vus_run:
-                    vus_run.add(aid)
+            label = f"Source {src}/{len(urls)} — " if len(urls) > 1 else ""
+            for ad in scraper.scrape(session, url, source_label=label, progress_cb=on_progress):
+                if ad.id_str not in vus_run:
+                    vus_run.add(ad.id_str)
                     ads.append(ad)
 
             if src < len(urls):  # délai anti-DataDome entre deux sources
@@ -282,27 +277,16 @@ def run_search(slug: str, progress_cb=None) -> dict:
         #    précédent avait échoué (rejugées tant qu'elles réapparaissent).
         nouveaux = [
             a for a in ads
-            if str(a.get("id")) not in seen or _en_erreur(seen[str(a.get("id"))])
+            if a.id_str not in seen or _en_erreur(seen[a.id_str])
         ]
         log.info("%d annonces au total, %d à analyser (nouvelles + erreurs précédentes).",
                  len(ads), len(nouveaux))
-        if progress_cb:
-            progress_cb({
-                "phase": "analyse", "current": 0, "total": len(nouveaux),
-                "message": f"{len(nouveaux)} nouvelle(s) annonce(s) à analyser",
-            })
+        on_progress(Progress("analyse", 0, len(nouveaux),
+                             f"{len(nouveaux)} nouvelle(s) annonce(s) à analyser"))
 
-        # 3. Analyse LLM des seules nouvelles annonces, avec sauvegarde incrémentale.
-        def _judge_progress(i, total, ad):
-            seen[str(ad.get("id"))] = _record(ad, run_ts)
-            save_seen(slug, seen)  # incrémental : un crash ne perd pas le travail fait
-            if progress_cb:
-                progress_cb({
-                    "phase": "analyse", "current": i, "total": total,
-                    "message": f"Analyse {i}/{total} — {ad.get('titre')}",
-                })
-
-        analyze.analyser_liste(session, nouveaux, search["critere"], progress_cb=_judge_progress)
+        # 3. Analyse LLM des seules nouvelles annonces, avec sauvegarde incrémentale
+        #    (assurée par on_progress dès qu'une annonce porte un verdict).
+        analyze.analyser_liste(session, nouveaux, search["critere"], progress_cb=on_progress)
 
         # 4. Finalisation.
         search["last_run"] = run_ts
