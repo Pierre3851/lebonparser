@@ -1,15 +1,23 @@
-"""Interface avec le LLM local via Ollama, en sortie structurée (JSON).
+"""Interface avec le LLM, en sortie structurée (JSON), pour juger une annonce.
 
-On demande au modèle de juger une annonce vis-à-vis d'un critère en langage
-naturel (propre à chaque recherche), et on récupère un objet validé
+Deux backends, choisis par `config.LLM_BACKEND` :
+  - "ollama" : modèle local (GPU recommandé), via le client Ollama, en mode
+    thinking avec un filet anti-troncature ;
+  - "api"    : LLM distant via clé d'API (aucun GPU requis), via Instructor —
+    une seule interface pour Anthropic/OpenAI/… avec validation Pydantic et
+    retries automatiques sur erreur de schéma.
+
+Dans les deux cas on demande au modèle de juger une annonce vis-à-vis d'un
+critère en langage naturel, et on récupère un objet validé
 {interessant, score, raison}.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
-import ollama
 from pydantic import BaseModel, Field
 
 import config
@@ -22,8 +30,6 @@ class Jugement(BaseModel):
     score: int = Field(ge=0, le=10, description="Pertinence de 0 (hors sujet) à 10 (parfait)")
     raison: str = Field(description="Justification courte (1 phrase)")
 
-
-_client = ollama.Client(host=config.OLLAMA_HOST)
 
 _SYSTEM = (
     "Tu tries des annonces leboncoin selon le critère de l'utilisateur, en jugeant "
@@ -40,19 +46,55 @@ _SYSTEM = (
 )
 
 
-def judge(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
-    """Juge une annonce selon `critere`. Renvoie (Jugement validé, trace de raisonnement).
-
-    La trace (`message.thinking`) est vide si le mode thinking est désactivé."""
-    user = (
+def _user(annonce_texte: str, critere: str) -> str:
+    return (
         f"CRITÈRE RECHERCHÉ :\n{critere.strip()}\n\n"
         f"ANNONCE À ÉVALUER :\n{annonce_texte.strip()}\n\n"
         "Évalue la correspondance et réponds en JSON "
         "(champs: interessant, score 0-10, raison)."
     )
+
+
+def judge(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
+    """Juge une annonce selon `critere`. Renvoie (Jugement validé, trace de raisonnement).
+
+    La trace est vide hors mode thinking Ollama (notamment pour le backend API)."""
+    if config.LLM_BACKEND == "api":
+        return _judge_api(annonce_texte, critere)
+    return _judge_ollama(annonce_texte, critere)
+
+
+def check_ready() -> None:
+    """Vérifie que le backend choisi est utilisable (sinon explique)."""
+    if config.LLM_BACKEND == "api":
+        _check_ready_api()
+    else:
+        _check_ready_ollama()
+
+
+# --------------------------------------------------------------------------- #
+# Backend "ollama" (modèle local)
+# --------------------------------------------------------------------------- #
+
+_ollama_client = None
+_ollama_lock = threading.Lock()
+
+
+def _client():
+    """Client Ollama (créé à la demande)."""
+    global _ollama_client
+    if _ollama_client is None:
+        with _ollama_lock:
+            if _ollama_client is None:
+                import ollama
+                _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
+    return _ollama_client
+
+
+def _judge_ollama(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
     messages = [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user},
+        {"role": "user", "content": _user(annonce_texte, critere)},
     ]
     kwargs = dict(
         model=config.OLLAMA_MODEL,
@@ -66,10 +108,9 @@ def judge(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
     )
 
     def _chat(think):
-        try:
-            return _client.chat(think=think, **kwargs)
-        except TypeError:
-            return _client.chat(**kwargs)  # ancienne version d'ollama sans 'think'
+        # Pas de repli sur une ancienne signature : si le client ollama ne supporte
+        # pas `think`, l'erreur doit remonter (aucun fallback silencieux).
+        return _client().chat(think=think, **kwargs)
 
     resp = _chat(config.OLLAMA_THINK)
     content = (resp["message"].get("content") or "").strip()
@@ -88,7 +129,7 @@ def judge(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
             thinking = f"{thinking}\n{note}".strip() if thinking else note
             content = retry
 
-    _log_usage(resp)
+    _log_usage_ollama(resp)
 
     if not content:
         raise ValueError(
@@ -98,8 +139,8 @@ def judge(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
     return Jugement.model_validate_json(content), thinking
 
 
-def _log_usage(resp) -> None:
-    """Journalise l'usage en tokens d'une réponse, pour valider la taille du contexte.
+def _log_usage_ollama(resp) -> None:
+    """Journalise l'usage en tokens d'une réponse Ollama, pour valider le contexte.
 
     Champs Ollama (doc : https://docs.ollama.com/api) :
       - prompt_eval_count : tokens du prompt (entrée) ;
@@ -124,10 +165,10 @@ def _log_usage(resp) -> None:
                     total, ctx, round(100 * total / ctx))
 
 
-def check_ready() -> None:
+def _check_ready_ollama() -> None:
     """Vérifie qu'Ollama répond et que le modèle est disponible (sinon explique)."""
     try:
-        models = [m["model"] for m in _client.list().get("models", [])]
+        models = [m["model"] for m in _client().list().get("models", [])]
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
             f"Ollama injoignable sur {config.OLLAMA_HOST} ({exc}).\n"
@@ -138,4 +179,113 @@ def check_ready() -> None:
         raise SystemExit(
             f"Modèle '{config.OLLAMA_MODEL}' absent. Lance : "
             f"ollama pull {config.OLLAMA_MODEL}\nModèles présents : {models}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Backend "api" (LLM distant via Instructor)
+# --------------------------------------------------------------------------- #
+
+# Variable d'environnement (chargée depuis .env par config) contenant la clé d'API.
+_API_KEY_ENV = "LLM_API_KEY"
+
+_api_client_singleton = None
+_api_lock = threading.Lock()
+
+
+class _RateLimiter:
+    """Limiteur de débit thread-safe : garantit au plus `rpm` départs de requêtes
+    par minute, en RÉSERVANT à chaque appel un créneau espacé de 60/rpm secondes.
+
+    Chaque thread réserve son créneau sous verrou (donc des créneaux distincts et
+    régulièrement espacés), puis attend l'heure réservée HORS verrou — les attentes
+    se chevauchent, ce qui reste compatible avec le ThreadPool de jugement.
+    On ne dépasse donc jamais la limite du fournisseur : aucun 429 (prévention, pas
+    de retry ni de fallback)."""
+
+    def __init__(self, rpm: int):
+        self._interval = 60.0 / rpm
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_allowed)
+            self._next_allowed = start + self._interval
+            wait = start - now
+        if wait > 0:
+            log.debug("        débit : attente %.1fs (LLM_RPM=%d)", wait, config.LLM_RPM)
+            time.sleep(wait)
+
+
+_rate_limiter_singleton = None
+
+
+def _rate_limiter() -> _RateLimiter:
+    """Limiteur de débit partagé (créé à la demande, après lecture de config.LLM_RPM)."""
+    global _rate_limiter_singleton
+    if _rate_limiter_singleton is None:
+        with _api_lock:
+            if _rate_limiter_singleton is None:
+                _rate_limiter_singleton = _RateLimiter(config.LLM_RPM)
+    return _rate_limiter_singleton
+
+
+def _api_client():
+    """Client Instructor (créé à la demande, partagé entre threads).
+
+    La clé est transmise explicitement (depuis LLM_API_KEY) plutôt que via la
+    variable propre au fournisseur, pour rester indépendant du fournisseur.
+    Le client sous-jacent (httpx) gère les requêtes concurrentes — on peut donc
+    le réutiliser depuis le ThreadPool de jugement (cf. analyze._analyser_parallele)."""
+    global _api_client_singleton
+    if _api_client_singleton is None:
+        with _api_lock:
+            if _api_client_singleton is None:
+                import instructor
+                # Pas de `mode=` : Instructor choisit le mode adapté au fournisseur
+                # (sortie structurée / tools selon Anthropic, Gemini, OpenAI…).
+                # Clé lue via _require_env : erreur explicite si absente (jamais None).
+                _api_client_singleton = instructor.from_provider(
+                    config.API_MODEL,
+                    api_key=config._require_env(_API_KEY_ENV),
+                )
+    return _api_client_singleton
+
+
+def _judge_api(annonce_texte: str, critere: str) -> tuple[Jugement, str]:
+    # Instructor valide la réponse contre Jugement et relance jusqu'à 2 fois si le
+    # schéma n'est pas respecté (remplace le filet anti-troncature d'Ollama).
+    # Respecte le débit max du fournisseur (LLM_RPM) AVANT d'émettre la requête :
+    # espace les départs pour ne jamais déclencher de 429 (prévention déterministe).
+    _rate_limiter().acquire()
+    # Pas de comptage de tokens ici : il n'existe pas de champ d'usage agnostique
+    # entre fournisseurs sans ajouter une dépendance (LiteLLM). On évite donc toute
+    # lecture tolérante multi-champs ; suivi du coût via le tableau de bord du fournisseur.
+    jugement = _api_client().chat.completions.create(
+        response_model=Jugement,
+        max_retries=2,
+        max_tokens=config.API_MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": _user(annonce_texte, critere)},
+        ],
+    )
+    return jugement, ""  # pas de trace de raisonnement en mode API
+
+
+def _check_ready_api() -> None:
+    """Vérifie que le client API est initialisable.
+
+    La présence des variables .env requises (dont LLM_API_KEY) est déjà exigée par
+    config au démarrage — sans valeur par défaut. Ici on ne fait que construire le
+    client, pour détecter tôt un modèle/paquet fournisseur invalide."""
+    try:
+        _api_client()
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(
+            f"Client API '{config.API_MODEL}' non initialisable ({exc}).\n"
+            "Vérifie le nom du modèle (format Instructor « fournisseur/modèle ») "
+            "et que le paquet du fournisseur est installé."
         )

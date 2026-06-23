@@ -3,7 +3,19 @@
 Le par-recherche (nom, URL, critère) est saisi dans l'interface web et stocké
 dans searches/<slug>/search.json — il n'a pas sa place ici. Ce fichier ne contient
 que les réglages transverses : accès au site, paramètres du LLM, seuils, délais.
+
+Les secrets (clé d'API du LLM distant) ne sont PAS ici : ils sont lus depuis un
+fichier .env (non commité) chargé ci-dessous. Voir .env.example pour le modèle.
 """
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Charge .env (placé à la racine du projet, à côté de ce fichier) dans l'environnement.
+# Ne fait rien si le fichier est absent (le backend "ollama" n'en a pas besoin).
+load_dotenv(Path(__file__).with_name(".env"))
 
 # ---------------------------------------------------------------------------
 # Accès au site / scraping
@@ -28,7 +40,37 @@ BROWSER_USER_AGENT = (
 HTTP_TIMEOUT = 30.0
 
 # ---------------------------------------------------------------------------
-# Analyse par le LLM local (Ollama)
+# Choix du backend LLM
+# ---------------------------------------------------------------------------
+# "ollama" : modèle local (GPU recommandé) — réglages OLLAMA_* ci-dessous.
+# "api"    : LLM distant via clé d'API (aucun GPU requis, jugement parallélisable)
+#            — config dans .env (voir .env.example). L'application est AGNOSTIQUE
+#            du fournisseur : tout le spécifique (fournisseur, modèle, clé) vit
+#            dans .env via Instructor, jamais dans le code.
+
+
+def _require_env(name: str) -> str:
+    """Lit une variable .env OBLIGATOIRE. AUCUNE valeur par défaut : si elle manque,
+    on lève une erreur explicite affichée à l'utilisateur, plutôt que de retomber sur
+    un comportement implicite (pas de défaut, pas de fallback silencieux)."""
+    val = (os.environ.get(name) or "").strip()
+    if not val:
+        raise SystemExit(
+            f"Variable « {name} » absente du fichier .env (aucune valeur par défaut "
+            f"n'est utilisée). Renseigne-la — voir .env.example."
+        )
+    return val
+
+
+# Backend obligatoire, sans défaut.
+LLM_BACKEND = _require_env("LLM_BACKEND")
+if LLM_BACKEND not in ("ollama", "api"):
+    raise SystemExit(
+        f"LLM_BACKEND doit valoir « ollama » ou « api » (lu : « {LLM_BACKEND} »)."
+    )
+
+# ---------------------------------------------------------------------------
+# Analyse par le LLM local (Ollama)  — backend "ollama"
 # ---------------------------------------------------------------------------
 
 OLLAMA_HOST = "http://localhost:11434"
@@ -50,6 +92,32 @@ OLLAMA_NUM_CTX = 8192
 #    llm.judge rejuge donc l'annonce sans thinking si le budget est épuisé (filet de
 #    sécurité fiable, cf. llm.py).
 OLLAMA_NUM_PREDICT = 4096
+
+# ---------------------------------------------------------------------------
+# Analyse par un LLM distant via clé d'API  — backend "api"
+# ---------------------------------------------------------------------------
+# Backend "api" : TOUT vient de .env, AUCUN défaut. Ces variables ne sont exigées
+# que si LLM_BACKEND == "api" (un utilisateur Ollama n'a pas à les renseigner).
+#
+#   - LLM_MODEL     : modèle au format Instructor "<fournisseur>/<modèle>". C'est le
+#                     SEUL endroit qui désigne le fournisseur ; le code l'ignore.
+#   - LLM_MAX_TOKENS: plafond de tokens générés par jugement (réponse JSON courte).
+#   - LLM_CONCURRENCY: jugements menés EN PARALLÈLE. ⚠ Seul l'appel au LLM distant
+#                     est parallélisé ; le téléchargement des annonces reste SÉQUENTIEL
+#                     et throttlé (anti-DataDome).
+#   - LLM_RPM       : débit MAX en requêtes/minute autorisé par ton offre. L'app
+#                     espace les départs (60/LLM_RPM s) pour ne jamais le dépasser
+#                     → aucun 429 (ex. palier gratuit Gemini = 15).
+#   - LLM_API_KEY   : clé du fournisseur (présence vérifiée ici, lue par llm.py).
+API_MODEL = API_MAX_TOKENS = LLM_CONCURRENCY = LLM_RPM = None
+if LLM_BACKEND == "api":
+    API_MODEL = _require_env("LLM_MODEL")
+    API_MAX_TOKENS = int(_require_env("LLM_MAX_TOKENS"))
+    LLM_CONCURRENCY = int(_require_env("LLM_CONCURRENCY"))
+    LLM_RPM = int(_require_env("LLM_RPM"))
+    if LLM_RPM <= 0:
+        raise SystemExit("LLM_RPM doit être un entier > 0 (requêtes/minute).")
+    _require_env("LLM_API_KEY")  # secret lu au moment de construire le client (llm.py)
 
 # On retient les annonces dont le score (0-10) attribué par le LLM est >= :
 SCORE_MIN = 6
