@@ -2,12 +2,12 @@
 
 ![Licence](https://img.shields.io/badge/licence-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)
-![LLM local](https://img.shields.io/badge/LLM-Ollama%20%C2%B7%20local-22a06b.svg)
+![LLM](https://img.shields.io/badge/LLM-Ollama%20local%20%C2%B7%20ou%20API-22a06b.svg)
 
 Récupère **toutes** les annonces d'une (ou plusieurs) recherche leboncoin, puis les
-filtre avec un **LLM local** (via Ollama) pour ne garder que celles qui correspondent
-à un critère décrit en langage naturel. Le tout 100 % sur ta machine, sans envoyer
-tes données à un service tiers.
+filtre avec un **LLM** pour ne garder que celles qui correspondent à un critère décrit
+en langage naturel. Au choix : un **modèle local** (Ollama, 100 % sur ta machine) ou
+un **LLM distant via clé d'API** (aucun GPU requis, jugement parallélisé).
 
 > 📖 **Documentation complète** (objectif, utilisation, architecture & diagrammes) :
 > voir le dossier [`docs/`](docs/index.md), publié sur **GitHub Pages**.
@@ -24,8 +24,9 @@ la session de ton navigateur **Firefox connecté** : ses cookies (dont le cookie
 (`curl_cffi`). Les données sont lues dans le JSON `__NEXT_DATA__` des pages.
 
 Pour chaque annonce : téléchargement du texte intégral, puis jugement par le LLM
-local (sortie structurée `{interessant, score, raison}`). On retient celles dont le
-score (0-10) dépasse `SCORE_MIN`.
+(sortie structurée `{interessant, score, raison}`). On retient celles dont le
+score (0-10) dépasse `SCORE_MIN`. Le backend LLM se choisit dans `.env`
+(`LLM_BACKEND`) — voir [Choisir le backend LLM](docs/utilisation.md#choisir-le-backend-llm).
 
 ## Utilisation
 
@@ -47,10 +48,14 @@ critère en langage naturel), puis clique **Run**. Voir la
 - **Firefox**, connecté à ton compte leboncoin, ayant ouvert le site au moins une
   fois récemment (pour disposer d'un cookie `datadome` valide).
 - **Python** (venv déjà fourni dans `.venv`).
-- **[Ollama](https://ollama.com/download)** installé, puis le modèle :
-  ```
-  ollama pull qwen3:8b
-  ```
+- **Un LLM**, au choix :
+  - **[Ollama](https://ollama.com/download)** local (GPU recommandé), puis le modèle :
+    ```
+    ollama pull qwen3:8b
+    ```
+  - ou une **clé d'API** distante (sans GPU) : tout dans un fichier `.env`
+    (`LLM_BACKEND=api`, `LLM_MODEL`, `LLM_API_KEY`, … — non commité, voir `.env.example`).
+    Aucune valeur par défaut : une variable manquante lève une erreur explicite.
 
 ## Installation
 
@@ -64,12 +69,12 @@ critère en langage naturel), puis clique **Run**. Voir la
 |---|---|
 | `app.py` | interface web Flask (multi-recherches, runs incrémentaux) |
 | `core.py` | cœur : stockage des recherches (`searches/`) + `run_search()` |
-| `config.py` | réglages globaux (modèle, seuils, délais) |
+| `config.py` | réglages globaux (Ollama, seuils, délais) ; le LLM distant se configure dans `.env` |
 | `cookies.py` | extraction des cookies leboncoin depuis le navigateur |
 | `web.py` | session HTTP + parsing `__NEXT_DATA__` (liste & détail) |
 | `scraper.py` | récupère la liste des annonces (`scrape()`) |
-| `llm.py` | appel Ollama en sortie structurée (`interessant`/`score`/`raison`) |
-| `analyze.py` | texte intégral + jugement LLM, en flux (`analyser_liste()`) |
+| `llm.py` | jugement LLM en sortie structurée — backend Ollama (local) ou API (Instructor) |
+| `analyze.py` | texte intégral + jugement LLM (séquentiel, ou parallèle en backend API) |
 | `templates/` | pages de l'app web (`index.html`, `results.html`) |
 | `docs/` | documentation MkDocs (GitHub Pages) |
 

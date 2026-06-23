@@ -30,7 +30,8 @@ package "Briques" {
 }
 
 cloud "leboncoin.fr\n(Next.js + DataDome)" as LBC
-node "Ollama\nqwen3:8b" as OLLAMA
+node "LLM local\n(Ollama, qwen3:8b)" as OLLAMA
+cloud "LLM distant\n(API, ex. Claude Haiku)" as APILLM
 database "searches/<slug>/\nsearch.json · seen.json · analyse.log" as STORE
 node "Firefox\n(cookies)" as FF
 
@@ -45,7 +46,8 @@ ANALYZE --> LLM
 WEB --> COOKIES
 WEB --> LBC
 COOKIES ..> FF
-LLM --> OLLAMA
+LLM --> OLLAMA : backend "ollama"
+LLM ..> APILLM : backend "api"
 
 CONFIG ..> APP
 CONFIG ..> CORE
@@ -61,9 +63,9 @@ CONFIG ..> LLM
 | `scraper.py` | `scrape(session, url)` — parcourt toutes les pages d'une recherche. |
 | `web.py` | session HTTP `curl_cffi` (empreinte Firefox) + extraction `__NEXT_DATA__`. |
 | `cookies.py` | extrait les cookies leboncoin (dont `datadome`) du navigateur. |
-| `analyze.py` | `analyser_liste()` — texte intégral + jugement LLM de chaque annonce. |
-| `llm.py` | `judge()` — appel Ollama en **sortie structurée** JSON validée (Pydantic). |
-| `config.py` | réglages globaux (modèle, seuils, délais, navigateur…). |
+| `analyze.py` | `analyser_liste()` — texte intégral + jugement LLM (séquentiel ou parallèle selon le backend). |
+| `llm.py` | `judge()` — **sortie structurée** JSON validée (Pydantic) ; backend **Ollama** (local) ou **API** (distant, via Instructor). |
+| `config.py` | réglages globaux (Ollama, seuils, délais, navigateur…) ; charge `.env` où vit toute la config du LLM distant. |
 
 ## Stockage : une recherche = un dossier
 
@@ -191,13 +193,14 @@ B -> U : barre de progression\npuis « Terminé »
 @enduml
 ```
 
-## Jugement d'une annonce (sortie structurée + filet anti-troncature)
+## Jugement d'une annonce — backend Ollama (sortie structurée + filet anti-troncature)
 
 `llm.judge()` demande à qwen3 un JSON conforme au schéma `Jugement`
 (`interessant`, `score` 0-10, `raison`). En mode *thinking*, le raisonnement peut
 épuiser le budget `num_predict` **avant** d'écrire le JSON (réponse vide,
 `done_reason=length`) : dans ce cas, l'annonce est **rejugée sans thinking** pour
-obtenir un verdict plutôt que de la perdre.
+obtenir un verdict plutôt que de la perdre. *(Ce diagramme décrit le backend local
+Ollama ; le backend API est décrit juste en dessous.)*
 
 ```plantuml
 @startuml
@@ -222,6 +225,68 @@ else (non)
 endif
 @enduml
 ```
+
+## Backend LLM : local (Ollama) ou distant (API parallélisable)
+
+`config.LLM_BACKEND` choisit comment juger les annonces. `llm.judge()` masque la
+différence ; c'est `analyze.analyser_liste()` qui adapte le **régime d'exécution**.
+
+| | Backend `ollama` (local) | Backend `api` (distant) |
+|---|---|---|
+| Modèle | qwen3:8b via Ollama (GPU recommandé) | ex. Claude Haiku 4.5 via Instructor |
+| Clé / coût | aucune | clé d'API (`.env` : `LLM_API_KEY`), ~1 €/run complet |
+| Sortie structurée | `format` = schéma JSON | `response_model=Jugement` (retries auto) |
+| Exécution | séquentielle, entrelacée | **2 phases : téléchargement séquentiel, jugement parallèle** |
+| Débit | latence GPU | **plafonné à `LLM_RPM`** (départs espacés) → aucun 429 |
+
+Le point clé : aujourd'hui la **latence du LLM espace** naturellement les requêtes
+vers leboncoin. Avec un LLM distant rapide et parallèle, ce garde-fou disparaît — il
+faut donc **découpler** le téléchargement (seul accès à leboncoin, qui doit rester
+séquentiel et throttlé contre DataDome) du jugement (sans accès réseau au site, donc
+parallélisable sans risque).
+
+```plantuml
+@startuml
+skinparam shadowing false
+start
+if (config.LLM_BACKEND) then (ollama)
+  partition "Séquentiel (entrelacé)" {
+    repeat :annonce suivante;
+      :fetch_body() — description;
+      :llm.judge() — jugement;
+      :MIN_FETCH_INTERVAL;
+    repeat while (reste des annonces ?) is (oui)
+    -> non;
+  }
+else (api)
+  partition "Phase A — téléchargement (SÉQUENTIEL, throttlé)" {
+    repeat :annonce suivante;
+      :fetch_body() — description;
+      :MIN_FETCH_INTERVAL\n(anti-DataDome);
+    repeat while (reste des annonces ?) is (oui)
+    -> non;
+  }
+  partition "Phase B — jugement (PARALLÈLE)" {
+    :ThreadPool (LLM_CONCURRENCY workers);
+    fork
+      :llm.judge() #1;
+    fork again
+      :llm.judge() #2;
+    fork again
+      :llm.judge() #N;
+    end fork
+    :progress_cb sous verrou\n(sauvegarde seen.json sérialisée);
+  }
+endif
+stop
+@enduml
+```
+
+!!! note "Sécurité de l'incrémental"
+    En Phase A, `progress_cb` n'est **pas** appelé : une annonce non encore jugée
+    donnerait un enregistrement incomplet dans `seen.json`. Rien n'est persisté tant
+    qu'une annonce n'a pas son verdict — un crash en Phase A se traduit donc par des
+    annonces simplement **rejugées** au run suivant.
 
 ## Accès à leboncoin (contournement DataDome)
 

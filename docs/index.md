@@ -1,7 +1,8 @@
 # lebonparser
 
 **Scrute une (ou plusieurs) recherche leboncoin et ne garde que les annonces qui
-t'intéressent vraiment — le tri est fait par un LLM qui tourne sur ta machine.**
+t'intéressent vraiment — le tri est fait par un LLM, local (Ollama) ou distant via
+clé d'API.**
 
 ## Le problème
 
@@ -18,8 +19,9 @@ juger une intention exprimée en langage naturel du genre :
 lebonparser automatise trois choses :
 
 1. **Récupérer** toutes les annonces d'une recherche (multi-pages, multi-URL).
-2. **Juger** chaque annonce avec un **LLM local** (Ollama / qwen3) contre un
-   **critère en langage naturel** : chaque annonce reçoit un score de 0 à 10.
+2. **Juger** chaque annonce avec un **LLM** — au choix **local** (Ollama / qwen3) ou
+   **distant via clé d'API** (sans GPU, parallélisé) — contre un **critère en langage
+   naturel** : chaque annonce reçoit un score de 0 à 10.
 3. **Présenter** les annonces retenues (score ≥ seuil), avec un suivi quotidien :
    un clic relance la recherche et **ne ré-analyse que les nouvelles annonces**.
 
@@ -30,7 +32,7 @@ skinparam defaultTextAlignment center
 
 rectangle "Recherche\nleboncoin\n(1 à N URL)" as LBC
 rectangle "lebonparser" as APP #lightblue
-rectangle "LLM local\n(Ollama / qwen3)" as LLM
+rectangle "LLM\n(Ollama local\nou API distante)" as LLM
 rectangle "Annonces retenues\n(score ≥ seuil)" as OUT #palegreen
 
 LBC --> APP : scraping
@@ -42,8 +44,9 @@ APP --> OUT
 
 ## Points clés
 
-- **100 % local et privé** : le jugement tourne sur ta machine (GPU/CPU), aucune
-  annonce ni critère n'est envoyé à un service tiers.
+- **Deux backends LLM** : *local* (Ollama) — 100 % sur ta machine, rien n'est envoyé
+  à un tiers ; ou *API distante* — sans GPU et jugement parallélisé (les annonces sont
+  alors envoyées au fournisseur LLM choisi). Tout se règle dans `.env`.
 - **Incrémental** : la mémoire des annonces déjà vues (`seen.json`) évite de rejuger
   ce qui l'a déjà été. Le 1er run analyse tout ; les suivants sont quasi instantanés.
 - **Multi-recherches** : chaque recherche (nom + liste d'URL + critère) est

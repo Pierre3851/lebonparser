@@ -1,5 +1,5 @@
 site_name: lebonparser
-site_description: Scrape une recherche leboncoin et filtre les annonces avec un LLM local (Ollama).
+site_description: Scrape une recherche leboncoin et filtre les annonces avec un LLM (Ollama local ou API distante).
 docs_dir: docs
 
 theme:
@@ -31,6 +31,8 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight
   - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
   # Rendu des blocs ```plantuml``` en SVG inline, via un serveur PlantUML public
   # (build statique compatible GitHub Pages, sans Java local).
   - plantuml_markdown:
