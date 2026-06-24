@@ -9,6 +9,9 @@ filtre avec un **LLM** pour ne garder que celles qui correspondent à un critèr
 en langage naturel. Au choix : un **modèle local** (Ollama, 100 % sur ta machine) ou
 un **LLM distant via clé d'API** (aucun GPU requis, jugement parallélisé).
 
+> ⚡ **Repère de perf/coût** : un run complet de **430 annonces** filtrées en
+> **~10 min** pour **~10 centimes** (backend API, `gemini-3.1-flash-lite`).
+
 > 📖 **Documentation complète** (objectif, utilisation, architecture & diagrammes) :
 > voir le dossier [`docs/`](docs/index.md), publié sur **GitHub Pages**.
 
@@ -74,7 +77,7 @@ critère en langage naturel), puis clique **Run**. Voir la
 | `web.py` | session HTTP + parsing `__NEXT_DATA__` (liste & détail) |
 | `scraper.py` | récupère la liste des annonces (`scrape()`) |
 | `llm.py` | jugement LLM en sortie structurée — backend Ollama (local) ou API (Instructor) |
-| `analyze.py` | texte intégral + jugement LLM (séquentiel, ou parallèle en backend API) |
+| `analyze.py` | texte intégral + jugement LLM (séquentiel en Ollama ; pipeline téléchargement→jugements parallèles en API) |
 | `templates/` | pages de l'app web (`index.html`, `results.html`) |
 | `docs/` | documentation MkDocs (GitHub Pages) |
 

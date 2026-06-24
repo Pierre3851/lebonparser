@@ -187,11 +187,18 @@ deactivate W
 
 loop toutes les ~1 s
   B -> F : GET /api/run/<task_id>
-  F --> B : { phase, current, total, message, done }
+  F --> B : { phase, current, total, message, eta, done }
 end
-B -> U : barre de progression\npuis « Terminé »
+B -> U : barre de progression\n+ temps restant estimé (ETA)\npuis « Terminé »
 @enduml
 ```
+
+!!! tip "Temps restant estimé (ETA)"
+    Pendant l'analyse, `core` estime le temps **restant** (temps écoulé ÷ annonces
+    traitées × annonces restantes) et le joint à l'état (`eta`). Comme une annonce
+    n'est comptée qu'une fois **téléchargée *et* jugée**, l'estimation reflète le
+    **cycle complet**. Recalculée seulement **toutes les 10 annonces** pour un
+    affichage stable, elle apparaît collée à droite de la ligne de progression.
 
 ## Jugement d'une annonce — backend Ollama (sortie structurée + filet anti-troncature)
 
@@ -236,14 +243,16 @@ différence ; c'est `analyze.analyser_liste()` qui adapte le **régime d'exécut
 | Modèle | qwen3:8b via Ollama (GPU recommandé) | ex. Claude Haiku 4.5 via Instructor |
 | Clé / coût | aucune | clé d'API (`.env` : `LLM_API_KEY`), ~1 €/run complet |
 | Sortie structurée | `format` = schéma JSON | `response_model=Jugement` (retries auto) |
-| Exécution | séquentielle, entrelacée | **2 phases : téléchargement séquentiel, jugement parallèle** |
+| Exécution | séquentielle, entrelacée | **pipeline : 1 téléchargeur séquentiel → N jugements parallèles** |
 | Débit | latence GPU | **plafonné à `LLM_RPM`** (départs espacés) → aucun 429 |
 
 Le point clé : aujourd'hui la **latence du LLM espace** naturellement les requêtes
 vers leboncoin. Avec un LLM distant rapide et parallèle, ce garde-fou disparaît — il
 faut donc **découpler** le téléchargement (seul accès à leboncoin, qui doit rester
 séquentiel et throttlé contre DataDome) du jugement (sans accès réseau au site, donc
-parallélisable sans risque).
+parallélisable sans risque). Les deux tournent en **pipeline** : un unique producteur
+télécharge pendant que N consommateurs jugent les annonces déjà prêtes, si bien que la
+durée totale ≈ **max**(téléchargement, jugement) au lieu de leur **somme**.
 
 ```plantuml
 @startuml
@@ -259,23 +268,23 @@ if (config.LLM_BACKEND) then (ollama)
     -> non;
   }
 else (api)
-  partition "Phase A — téléchargement (SÉQUENTIEL, throttlé)" {
-    repeat :annonce suivante;
-      :fetch_body() — description;
-      :MIN_FETCH_INTERVAL\n(anti-DataDome);
-    repeat while (reste des annonces ?) is (oui)
-    -> non;
-  }
-  partition "Phase B — jugement (PARALLÈLE)" {
-    :ThreadPool (LLM_CONCURRENCY workers);
+  partition "Pipeline (téléchargement et jugement se recouvrent)" {
     fork
-      :llm.judge() #1;
+      :**1 producteur**;
+      repeat :annonce suivante;
+        :fetch_body() — description;
+        :pousser dans la file;
+        :MIN_FETCH_INTERVAL\n(anti-DataDome);
+      repeat while (reste des annonces ?) is (oui)
+      -> non;
     fork again
-      :llm.judge() #2;
-    fork again
-      :llm.judge() #N;
+      :**N consommateurs**\n(LLM_CONCURRENCY);
+      repeat :tirer de la file;
+        :llm.judge();
+        :progress_cb sous verrou\n(seen.json + ETA);
+      repeat while (file non vide ?) is (oui)
+      -> non;
     end fork
-    :progress_cb sous verrou\n(sauvegarde seen.json sérialisée);
   }
 endif
 stop
@@ -283,10 +292,10 @@ stop
 ```
 
 !!! note "Sécurité de l'incrémental"
-    En Phase A, `progress_cb` n'est **pas** appelé : une annonce non encore jugée
-    donnerait un enregistrement incomplet dans `seen.json`. Rien n'est persisté tant
-    qu'une annonce n'a pas son verdict — un crash en Phase A se traduit donc par des
-    annonces simplement **rejugées** au run suivant.
+    Le **producteur** n'appelle **pas** `progress_cb` : une annonce téléchargée mais pas
+    encore jugée donnerait un enregistrement incomplet dans `seen.json`. Seul le
+    **consommateur** persiste, après le verdict — un crash pendant le téléchargement se
+    traduit donc par des annonces simplement **rejugées** au run suivant.
 
 ## Accès à leboncoin (contournement DataDome)
 

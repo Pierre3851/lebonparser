@@ -103,12 +103,15 @@ Sur la page d'accueil, remplis le formulaire :
 Clique **Run** sur la ligne de la recherche. Une barre de progression suit en direct :
 
 - **scraping** — `Source i/N — page x/y — n annonces`
-- **analyse** — `Analyse i/total — <titre>` (seulement les nouvelles annonces)
+- **analyse** — `Analyse i/total — <titre>` (seulement les nouvelles annonces), avec le
+  **temps restant estimé** affiché **à droite** (recalculé toutes les 10 annonces).
 
-!!! note "Backend API : deux phases"
-    En backend `api`, l'analyse se fait en deux temps — d'abord le téléchargement des
-    descriptions (séquentiel), puis le jugement **parallèle**. La barre avance pendant la
-    phase de jugement ; le détail des deux phases est visible dans `analyse.log`.
+!!! note "Backend API : pipeline téléchargement + jugement"
+    En backend `api`, un unique téléchargeur récupère les descriptions (séquentiel,
+    throttlé anti-DataDome) **pendant que** plusieurs jugements LLM tournent en
+    **parallèle** sur les annonces déjà prêtes. Les deux se **recouvrent** : la durée
+    totale s'approche du plus long des deux au lieu de leur somme. Le détail est visible
+    dans `analyse.log`.
 
 Le 1er run analyse toutes les annonces (plusieurs minutes selon le volume). **Les
 runs suivants ne jugent que les nouveautés** : relancer juste après donne « 0
