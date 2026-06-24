@@ -228,6 +228,26 @@ def _en_erreur(rec: dict) -> bool:
     return bool(rec.get("erreur"))
 
 
+def _eta_seconds(p: Progress, timing: dict) -> int | None:
+    """Estime le temps RESTANT (en secondes) de la phase d'analyse.
+
+    Le cycle complet (téléchargement du texte + jugement LLM) est mesuré : en backend
+    `api` le consommateur ne notifie qu'après le verdict, donc `p.current` = annonces
+    entièrement traitées. Recalculé seulement toutes les 10 annonces (et sur la dernière)
+    pour un affichage stable ; entre deux, on renvoie la dernière estimation."""
+    if p.phase != "analyse" or p.total <= 0:
+        return None
+    if p.current <= 0:  # début de l'analyse : on amorce le chrono
+        timing["t0"] = time.monotonic()
+        timing["eta"] = None
+        return None
+    if p.current % 10 == 0 or p.current == p.total:
+        elapsed = time.monotonic() - timing["t0"]
+        par_annonce = elapsed / p.current
+        timing["eta"] = max(0, round(par_annonce * (p.total - p.current)))
+    return timing["eta"]
+
+
 def run_search(slug: str, progress_cb=None) -> dict:
     """Exécute une recherche : scrape la liste complète, ne juge que les NOUVELLES
     annonces, met à jour seen.json, et renvoie un résumé du run.
@@ -250,13 +270,16 @@ def run_search(slug: str, progress_cb=None) -> dict:
         # `Progress`). Quand `item` est présent (une annonce vient d'être jugée), on la
         # persiste dans seen.json de façon incrémentale ; on transmet toujours l'état à
         # l'UI sous forme de dict (contrat inchangé côté app/JS).
+        timing: dict = {"t0": None, "eta": None}
+
         def on_progress(p: Progress) -> None:
             if p.item is not None:
                 seen[p.item.id_str] = _record(p.item, run_ts)
                 save_seen(slug, seen)  # incrémental : un crash ne perd pas le travail fait
+            eta = _eta_seconds(p, timing)
             if progress_cb:
                 progress_cb({"phase": p.phase, "current": p.current,
-                             "total": p.total, "message": p.message})
+                             "total": p.total, "message": p.message, "eta": eta})
 
         # 1. Scraping : une recherche peut couvrir plusieurs URL (sections leboncoin).
         #    On parcourt chaque source et on fusionne les annonces en dédoublonnant

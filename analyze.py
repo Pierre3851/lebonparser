@@ -9,18 +9,20 @@ Deux régimes d'exécution, selon `config.LLM_BACKEND` :
   - "ollama" : séquentiel et entrelacé. La latence d'inférence du LLM espace
     naturellement les requêtes vers leboncoin (un plancher MIN_FETCH_INTERVAL
     garantit un rythme doux même si l'inférence est rapide).
-  - "api" : DEUX phases. Phase A — téléchargement des descriptions, SÉQUENTIEL et
-    throttlé (anti-DataDome, car c'est le seul accès à leboncoin). Phase B —
-    jugement EN PARALLÈLE via le LLM distant (aucun accès à leboncoin, donc
-    parallélisable sans risque). C'est là que l'API fait gagner du temps.
+  - "api" : PIPELINE producteur/consommateur. UN producteur télécharge les
+    descriptions SÉQUENTIELLEMENT et throttlé (anti-DataDome, car c'est le seul
+    accès à leboncoin) et les pousse au fil de l'eau dans une file ; N=LLM_CONCURRENCY
+    consommateurs jugent EN PARALLÈLE via le LLM distant (aucun accès à leboncoin)
+    les annonces déjà téléchargées. Téléchargement et jugement se RECOUVRENT (max
+    des deux) au lieu de s'additionner. C'est là que l'API fait gagner du temps.
 
 Module utilisé par core.run_search ; `analyser_liste()` est l'entrée principale.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
+import queue
 import threading
 import time
 
@@ -149,39 +151,59 @@ def _analyser_sequentiel(session, a_juger: list[Annonce], critere: str,
 
 def _analyser_parallele(session, a_juger: list[Annonce], critere: str,
                         total: int, progress_cb) -> None:
-    """Phase A (téléchargement séquentiel throttlé) puis Phase B (jugement parallèle).
+    """Pipeline producteur/consommateur : le téléchargement et le jugement se recouvrent.
 
-    Seul le jugement LLM (appels API, sans accès leboncoin) est parallélisé : le
-    téléchargement reste séquentiel pour ne pas déclencher DataDome."""
-    # --- Phase A : téléchargement SÉQUENTIEL et throttlé (anti-DataDome) ---
-    # On NE notifie PAS progress_cb ici : core l'utilise pour sauvegarder seen.json,
-    # et une annonce pas encore jugée donnerait un enregistrement incomplet (score 0,
-    # sans verdict). Tant qu'une annonce n'est pas jugée (Phase B), rien n'est persisté :
-    # un crash en Phase A → ces annonces sont simplement rejugées au prochain run.
-    log.info("Phase A : téléchargement de %d description(s) (séquentiel)…", total)
-    for i, ad in enumerate(a_juger, 1):
-        t0 = time.monotonic()
-        _fetch_description(session, ad, i, total)
-        if i < total:
-            _throttle(t0)
+    UN producteur télécharge les descriptions SÉQUENTIELLEMENT et throttlé (c'est le
+    seul accès à leboncoin → anti-DataDome) et pousse chaque annonce prête dans une
+    file. N=LLM_CONCURRENCY consommateurs jugent EN PARALLÈLE (appels LLM, sans accès
+    leboncoin) les annonces déjà téléchargées. Durée ≈ max(téléchargement, jugement)
+    au lieu de leur somme.
 
-    # --- Phase B : jugement LLM EN PARALLÈLE ---
+    Le producteur NE notifie PAS progress_cb (core s'en sert pour persister seen.json :
+    une annonce pas encore jugée donnerait un enregistrement incomplet). Seul le
+    consommateur notifie, après le verdict — donc tant qu'une annonce n'est pas jugée,
+    rien n'est persisté, et un crash en téléchargement la fait simplement rejuger au
+    prochain run."""
     workers = llm.max_concurrency()
-    log.info("Phase B : jugement de %d annonce(s) (%d en parallèle)…", total, workers)
+    log.info("Pipeline : 1 téléchargeur (séquentiel) → %d juge(s) en parallèle, %d annonce(s).",
+             workers, total)
+
+    file: queue.Queue = queue.Queue()
     done = 0
     lock = threading.Lock()
 
-    def _work(item):
-        i, ad = item
-        _judge_description(ad, i, total, critere)
-        return ad
+    def producteur() -> None:
+        # Téléchargement SÉQUENTIEL throttlé ; chaque annonce prête part aussitôt au
+        # jugement. Le finally garantit l'envoi des sentinelles même en cas d'imprévu,
+        # pour que les consommateurs ne restent jamais bloqués sur la file.
+        try:
+            for i, ad in enumerate(a_juger, 1):
+                t0 = time.monotonic()
+                _fetch_description(session, ad, i, total)
+                file.put((i, ad))
+                if i < total:
+                    _throttle(t0)
+        finally:
+            for _ in range(workers):  # une sentinelle d'arrêt par consommateur
+                file.put(None)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_work, (i, ad)) for i, ad in enumerate(a_juger, 1)]
-        for fut in concurrent.futures.as_completed(futures):
-            ad = fut.result()
+    def consommateur() -> None:
+        nonlocal done
+        while True:
+            item = file.get()
+            if item is None:  # sentinelle : plus rien à juger
+                return
+            i, ad = item
+            _judge_description(ad, i, total, critere)
             # Sérialise les effets de bord (sauvegarde seen.json + progression) :
-            # progress_cb n'est donc jamais appelé par deux threads à la fois.
+            # progress_cb n'est jamais appelé par deux threads à la fois.
             with lock:
                 done += 1
                 _notify(progress_cb, done, total, ad)
+
+    consommateurs = [threading.Thread(target=consommateur, daemon=True) for _ in range(workers)]
+    for t in consommateurs:
+        t.start()
+    producteur()  # tourne dans le thread courant : sa fin pousse les sentinelles
+    for t in consommateurs:
+        t.join()

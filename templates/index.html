@@ -46,7 +46,9 @@
  .progress.on { display:block; }
  .bar-outer { background:#3a3b40; border-radius:6px; height:14px; overflow:hidden; }
  .bar-inner { background:#22a06b; height:100%; width:0%; transition:width .3s; }
- .progress .msg { font-size:.85rem; color:#b8babf; margin-top:.3rem; }
+ .progress .msg { display:flex; justify-content:space-between; align-items:baseline;
+                  gap:.6rem; font-size:.85rem; color:#b8babf; margin-top:.3rem; }
+ .progress .eta { color:#9aa0a6; white-space:nowrap; flex:0 0 auto; }
  .progress.err .bar-inner { background:#e0566a; }
  .empty { color:#9aa0a6; }
 </style>
@@ -81,7 +83,7 @@
     </div>
     <div class="progress" id="prog-{{ s.slug }}">
       <div class="bar-outer"><div class="bar-inner"></div></div>
-      <div class="msg"></div>
+      <div class="msg"><span class="msg-text"></span><span class="eta"></span></div>
     </div>
   </div>
   {% endfor %}
@@ -226,7 +228,7 @@ function lancer(slug, btn) {
   btn.disabled = true;
   const prog = document.getElementById('prog-' + slug);
   const bar = prog.querySelector('.bar-inner');
-  const msg = prog.querySelector('.msg');
+  const msg = prog.querySelector('.msg-text');
   prog.classList.add('on');
   prog.classList.remove('err');
   bar.style.width = '0%';
@@ -238,17 +240,27 @@ function lancer(slug, btn) {
     .catch(e => { msg.textContent = 'Erreur : ' + e; btn.disabled = false; });
 }
 
+function fmtEta(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + ' s';
+  const m = Math.floor(s / 60), r = s % 60;
+  return r ? m + ' min ' + r + ' s' : m + ' min';
+}
+
 function poll(taskId, prog, bar, msg, btn) {
+  const eta = prog.querySelector('.eta');
   fetch('/api/run/' + taskId).then(r => r.json()).then(st => {
     if (st.error) {
       prog.classList.add('err');
       msg.textContent = 'Échec : ' + st.error;
+      eta.textContent = '';
       btn.disabled = false;
       return;
     }
     const pct = st.total > 0 ? Math.round(100 * st.current / st.total) : (st.done ? 100 : 5);
     bar.style.width = pct + '%';
     msg.textContent = st.message || st.phase;
+    eta.textContent = (st.eta != null && !st.done) ? 'reste ~' + fmtEta(st.eta) : '';
     if (st.done) {
       bar.style.width = '100%';
       const sum = st.summary || {};
